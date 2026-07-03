@@ -92,15 +92,40 @@ class Tls:
         self.usb = usb
         self.trace_enabled = False
         self.reset()
-        try:
-            with open('/sys/class/dmi/id/product_name', 'r') as node:
-                product_name = node.read().strip()
-            with open('/sys/class/dmi/id/product_serial', 'r') as node:
-                product_serial = node.read().strip()
-        except:
-            product_name = 'VirtualBox'
-            product_serial = '0'
+        # The pre-TLS host key is derived from the machine's DMI product_name +
+        # product_serial. product_serial is root-only (mode 0400), so a non-root
+        # process silently falls back to 'VirtualBox'/'0'. That means a device
+        # paired by a non-root (or containerised) run is bound to the FALLBACK
+        # identity, and the root system service would otherwise derive a different
+        # key and fail with "paired with another computer".
+        #
+        # Allow an explicit override via env vars so the identity can be pinned
+        # regardless of who runs the daemon (also lets dual-boot users match the
+        # identity Windows paired with). If PV_PRODUCT_NAME is set, both values
+        # are taken from the environment; otherwise fall back to DMI, then to the
+        # legacy 'VirtualBox'/'0' constants. An empty PV_PRODUCT_NAME is treated
+        # as unset (falls through to DMI) rather than as a literal empty name.
+        env_name = os.environ.get('PV_PRODUCT_NAME')
+        if env_name:
+            product_name = env_name
+            product_serial = os.environ.get('PV_PRODUCT_SERIAL', '0')
+            source = 'env'
+        else:
+            try:
+                with open('/sys/class/dmi/id/product_name', 'r') as node:
+                    product_name = node.read().strip()
+                with open('/sys/class/dmi/id/product_serial', 'r') as node:
+                    product_serial = node.read().strip()
+                source = 'dmi'
+            except:
+                product_name = 'VirtualBox'
+                product_serial = '0'
+                source = 'fallback'
 
+        # Log the product_name + source to help diagnose "paired with another
+        # computer" mismatches, but never the serial: it is device-unique and
+        # would otherwise be written to the (root-readable) journal.
+        logging.debug('Host identity: product_name=%r source=%s' % (product_name, source))
         self.set_hwkey(product_name=product_name, serial_number=product_serial)
 
     def reset(self):
