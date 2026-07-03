@@ -4,6 +4,7 @@ import typing
 from binascii import hexlify, unhexlify
 from enum import Enum
 from struct import unpack
+from time import sleep
 
 import usb.core as ucore
 from usb.core import USBError
@@ -62,6 +63,27 @@ class Usb:
     def open_dev(self, dev: ucore.Device):
         if dev is None:
             raise Exception('No matching devices found')
+
+        # Unwedge (06cb:00a2 only): after a prior bad state this sensor can leave
+        # EP 0x81 (bulk IN) reads timing out, so the very first command hangs. A
+        # USB port reset reliably clears it. This mirrors the proven standalone-
+        # tool flow (reset -> settle -> re-find -> open); the stock driver relied
+        # on close()/atexit doing the reset, which does not help a fresh daemon
+        # start that inherits a wedged device. Gated to the MoH device so the
+        # other supported sensors (which never wedge) keep their zero-reset open.
+        if (dev.idVendor, dev.idProduct) == SupportedDevices.DEV_a2.value:
+            vid, pid = dev.idVendor, dev.idProduct
+            try:
+                dev.reset()
+            except USBError as e:
+                logging.debug('usb reset during open failed (continuing): %r' % e)
+            else:
+                # reset() invalidates the handle and may re-enumerate the device
+                # (new bus address), so re-find by VID:PID, not the old address.
+                sleep(1.0)
+                dev = ucore.find(idVendor=vid, idProduct=pid)
+                if dev is None:
+                    raise Exception('06cb:00a2 not found after USB reset')
 
         self.dev = dev
         self.dev.default_timeout = 15000
