@@ -13,7 +13,7 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from cryptography.hazmat.primitives.asymmetric.utils import Prehashed
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from .usb import usb, Usb
+from .usb import usb, Usb, TlsProtocolError
 from .util import unhex
 
 password_hardcoded = unhexlify('717cd72d0962bc4a2846138dbb2c24192512a76407065f383846139d4bec2033')
@@ -373,7 +373,7 @@ class Tls:
             pkt, rsp = rsp[:sz], rsp[sz:]
 
             if mj != 3 or mn != 3:
-                raise Exception('Unexpected TLS version %d %d' % (mj, mn))
+                raise TlsProtocolError('Unexpected TLS version %d %d' % (mj, mn))
 
             if t == 0x16:
                 self.handle_handshake(pkt)

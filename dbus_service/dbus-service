@@ -27,7 +27,7 @@ from validitysensor.init_data_dir import PYTHON_VALIDITY_DATA_DIR, init_data_dir
 from validitysensor.sensor import sensor, RebootException
 from validitysensor.sid import sid_from_string
 from validitysensor.tls import tls
-from validitysensor.usb import usb
+from validitysensor.usb import usb, is_fatal_device_error, fatal_device_exit
 from validitysensor.fingerprint_constants import finger_ids
 
 dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
@@ -64,6 +64,18 @@ class Device(dbus.service.Object):
         """Resolve user name to database object"""
         return db.lookup_user(self.user2identity(user))
 
+    def call_device(self, fn, *args, **kwargs):
+        """Invoke a device-touching call, routing a fatal device error (dead USB
+        transport or desynced TLS stream) to a supervised restart via
+        fatal_device_exit() (which never returns). Any other exception propagates
+        to the caller unchanged, preserving the existing non-fatal semantics."""
+        try:
+            return fn(*args, **kwargs)
+        except Exception as e:
+            if is_fatal_device_error(e):
+                fatal_device_exit(e)
+            raise
+
     @dbus.service.method(dbus_interface=INTERFACE_NAME, in_signature='', out_signature='')
     def Suspend(self):
         logging.debug('In Suspend')
@@ -79,35 +91,32 @@ class Device(dbus.service.Object):
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME, in_signature="s", out_signature="as")
     def ListEnrolledFingers(self, user):
-        try:
-            logging.debug('In ListEnrolledFingers %s' % user)
+        logging.debug('In ListEnrolledFingers %s' % user)
 
-            usr = self.user2record(user)
+        usr = self.call_device(self.user2record, user)
 
-            if usr is None:
-                return []
+        if usr is None:
+            return []
 
-            rc = [subtype_to_string(f['subtype']) for f in usr.fingers]
-            logging.debug(repr(rc))
-            return rc
-        except Exception as e:
-            raise e
+        rc = [subtype_to_string(f['subtype']) for f in usr.fingers]
+        logging.debug(repr(rc))
+        return rc
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME, in_signature='s', out_signature='')
     def DeleteEnrolledFingers(self, user):
         logging.debug('In DeleteEnrolledFingers %s' % user)
-        usr = self.user2record(user)
+        usr = self.call_device(self.user2record, user)
 
         if usr is None:
             return
 
-        db.del_record(usr.dbid)
+        self.call_device(db.del_record, usr.dbid)
 
     @dbus.service.method(dbus_interface=INTERFACE_NAME, in_signature='ss', out_signature='')
     def VerifyStart(self, user, finger):
         logging.debug('In VerifyStart for %s, %s' % (user, finger))
 
-        usr = self.user2record(user)
+        usr = self.call_device(self.user2record, user)
 
         if usr is None:
             raise NoEnrolledPrints()
@@ -125,11 +134,12 @@ class Device(dbus.service.Object):
                     self.VerifyStatus('verify-match', True)
                 else:
                     self.VerifyStatus('verify-no-match', True)
-            except usb_core.USBError as e:
-                logging.exception(e)
-                self.VerifyStatus('verify-no-match', True)
-                loop.quit()
             except Exception as e:
+                # A fatal device error (dead USB transport or desynced TLS stream)
+                # exits the process so systemd restarts it and reset-on-open
+                # rebuilds the session; anything else is a normal no-match.
+                if is_fatal_device_error(e):
+                    fatal_device_exit(e)
                 logging.exception(e)
                 self.VerifyStatus('verify-no-match', True)
 
@@ -145,7 +155,7 @@ class Device(dbus.service.Object):
     def EnrollStart(self, user, finger_name):
         logging.debug('In EnrollStart %s for %s' % (finger_name, user))
 
-        usr = self.user2identity(user)
+        usr = self.call_device(self.user2identity, user)
         index = finger_ids.get(finger_name, None)
 
         def update_cb(rsp, e):
@@ -158,11 +168,12 @@ class Device(dbus.service.Object):
             try:
                 sensor.enroll(usr, index, update_cb)
                 self.EnrollStatus('enroll-completed', True)
-            except usb_core.USBError as e:
-                logging.exception(e)
-                self.EnrollStatus('enroll-failed', True)
-                loop.quit()
             except Exception as e:
+                # A fatal device error (dead USB transport or desynced TLS stream)
+                # exits the process so systemd restarts it and reset-on-open
+                # rebuilds the session; anything else is a normal enroll failure.
+                if is_fatal_device_error(e):
+                    fatal_device_exit(e)
                 logging.exception(e)
                 self.EnrollStatus('enroll-failed', True)
 

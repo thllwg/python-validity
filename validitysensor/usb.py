@@ -1,5 +1,6 @@
 import errno
 import logging
+import os
 import typing
 from binascii import hexlify, unhexlify
 from enum import Enum
@@ -32,6 +33,40 @@ supported_devices = dict((dev.value, dev) for dev in SupportedDevices)
 
 class CancelledException(Exception):
     pass
+
+
+class TlsProtocolError(Exception):
+    """Protocol-stream corruption (TLS desync).
+
+    Raised when the host<->sensor TLS stream is out of sync (e.g. an unexpected
+    TLS version in a record header). The session cannot be recovered in place;
+    it must be torn down and rebuilt, which for this crash-only daemon means a
+    supervised restart.
+    """
+    pass
+
+
+def is_fatal_device_error(e: BaseException) -> bool:
+    # Only a dead transport (usb.core.USBError, which includes USBTimeoutError
+    # [Errno 110] and NoDeviceError [Errno 19]) or a desynced protocol stream
+    # (TlsProtocolError) are unrecoverable-in-session and warrant a supervised
+    # restart. A normal no-match (a plain Exception('Finger not recognized:
+    # ...')), a CancelledException, or a transient mid-scan hiccup must NOT
+    # trigger a restart.
+    return isinstance(e, (ucore.USBError, TlsProtocolError))
+
+
+def fatal_device_exit(e: BaseException) -> 'typing.NoReturn':
+    # This runs from worker threads, where sys.exit()/raise would only unwind the
+    # thread and leave the process alive-but-broken (every later op fails and
+    # fingerprint auth silently falls back to password). os._exit() terminates the
+    # WHOLE process with a non-zero code so systemd's Restart=on-failure fires, and
+    # the next start's reset-on-open rebuilds the session from flash. It also
+    # deliberately skips the atexit handler (which would attempt a soft reboot()
+    # that hangs on a wedged device) — the reset-on-open at the next start does the
+    # reset for us.
+    logging.error('Fatal device error, exiting for supervised restart: %r' % e)
+    os._exit(1)
 
 
 class Usb:
